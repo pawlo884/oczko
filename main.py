@@ -16,6 +16,10 @@ except ImportError:
 
 # Card ranks and their values
 RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+SUITS = ['♥', '♣', '♠', '♦']
+NUMBERS = ['2', '3', '4', '5', '6', '7', '8', '9', '10']
+FIGURES = ['J', 'Q', 'K']
+ACES = ['A']
 VALUES = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, 'J': 10, 'Q': 10, 'K': 10, 'A': 11}
 
 # Number of decks
@@ -159,13 +163,34 @@ def calculate_ev_hit(player_cards, remaining, dealer_probs):
         ev += outcome * (count / total)
     return ev
 
-def get_advice(dealer_card, player_cards, remaining_global):
+def calculate_ev_double(player_cards, remaining, dealer_probs):
     """
-    Get advice on whether to hit or stand.
+    Calculate expected value if player doubles down (hits once, doubles bet).
+    """
+    total = sum(remaining.values())
+    if total == 0:
+        return -2  # bust with double bet
+    
+    ev = 0
+    for rank, count in remaining.items():
+        if count == 0:
+            continue
+        new_cards = player_cards + [rank]
+        new_value = calculate_hand_value(new_cards)
+        if new_value > 21:
+            outcome = -2  # double bet lose
+        else:
+            outcome = 2 * calculate_ev_stand(new_value, dealer_probs)  # double bet
+        ev += outcome * (count / total)
+    return ev
+
+def get_advice(dealer_card, player_cards, remaining_global, can_double=False):
+    """
+    Get advice on whether to hit, stand, or double.
     """
     player_value = calculate_hand_value(player_cards)
     if player_value > 21:
-        return "Already busted!"
+        return "Już przekroczyłeś!"
 
     remaining = get_remaining_cards(dealer_card, player_cards, remaining_global)
     dealer_probs = calculate_dealer_probabilities(dealer_card, remaining)
@@ -173,21 +198,26 @@ def get_advice(dealer_card, player_cards, remaining_global):
     ev_stand = calculate_ev_stand(player_value, dealer_probs)
     ev_hit = calculate_ev_hit(player_cards, remaining, dealer_probs)
 
+    options = [('Stój', ev_stand), ('Dobierz', ev_hit)]
+    if can_double:
+        ev_double = calculate_ev_double(player_cards, remaining, dealer_probs)
+        options.append(('Podwój', ev_double))
+
+    best = max(options, key=lambda x: x[1])
+    advice = best[0]
+
     bust_prob = calculate_bust_probability(player_value, remaining)
-
-    if ev_hit > ev_stand:
-        advice = "Hit"
-    else:
-        advice = "Stand"
-
     dealer_bust_prob = dealer_probs.get('bust', 0)
 
-    return (f"Player hand value: {player_value}\n"
-            f"Bust probability if hit: {bust_prob:.2%}\n"
-            f"Dealer bust probability: {dealer_bust_prob:.2%}\n"
-            f"EV Stand: {ev_stand:.3f}\n"
-            f"EV Hit: {ev_hit:.3f}\n"
-            f"Advice: {advice}")
+    result = (f"Wartość ręki gracza: {player_value}\n"
+              f"Prawdopodobieństwo przekroczenia przy doborze: {bust_prob:.2%}\n"
+              f"Prawdopodobieństwo przekroczenia krupiera: {dealer_bust_prob:.2%}\n"
+              f"Oczekiwana wartość stania: {ev_stand:.3f}\n"
+              f"Oczekiwana wartość doboru: {ev_hit:.3f}\n")
+    if can_double:
+        result += f"Oczekiwana wartość podwojenia: {ev_double:.3f}\n"
+    result += f"Porada: {advice}"
+    return result
 
 def main():
     print("Blackjack Probability Calculator")
@@ -232,37 +262,52 @@ if FLASK_AVAILABLE:
     @app.route('/', methods=['GET', 'POST'])
     def index():
         advice = ""
+        dealer_selected = []
+        player_selected = []
+        can_double_checked = False
         if request.method == 'POST':
-            if 'get_advice' in request.form:
-                dealer_card = request.form.get('dealer_card', '').strip().upper()
-                player_cards = request.form.getlist('player_cards')
-                if dealer_card in RANKS and all(c in RANKS for c in player_cards):
-                    advice = get_advice(dealer_card, player_cards, remaining_global).replace('\n', '<br>')
+            dealer_selected = request.form.getlist('dealer_card')
+            player_selected = request.form.getlist('player_cards')
+            can_double_checked = 'can_double' in request.form
+            if 'get_advice' in request.form and (dealer_selected or player_selected):
+                if len(dealer_selected) == 1 and dealer_selected[0] in RANKS and all(c in RANKS for c in player_selected):
+                    dealer_card = dealer_selected[0]
+                    advice = get_advice(dealer_card, player_selected, remaining_global, can_double_checked).replace('\n', '<br>')
+                    # Clear selections after advice
+                    dealer_selected = []
+                    player_selected = []
+                    can_double_checked = False
                 else:
-                    advice = "Invalid input. Please select valid cards."
-            elif 'add_history' in request.form:
+                    advice = "Nieprawidłowe dane. Wybierz dokładnie jedną kartę krupiera i zaznacz karty gracza."
+            if 'add_history' in request.form:
                 played_str = request.form.get('played_cards', '').strip().upper()
-                played = played_str.split()
-                if all(c in RANKS for c in played):
+                played = []
+                for c in played_str.split():
+                    if len(c) >= 2 and c[0] in RANKS and c[1] in SUITS:
+                        played.append(c[0])
+                    elif c in RANKS:
+                        played.append(c)
+                if played:
                     history.extend(played)
                     for c in played:
                         remaining_global[c] -= 1
                 else:
-                    advice = "Invalid cards for history."
+                    advice = "Nieprawidłowe karty dla historii."
         
         html = """
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Blackjack Probability Calculator</title>
+            <title>Kalkulator Prawdopodobieństwa w Blackjacku</title>
             <style>
                 body { font-family: Arial, sans-serif; margin: 40px; background-color: #f4f4f4; }
                 h1 { color: #333; }
                 form { margin-bottom: 20px; background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-                label { display: block; margin-bottom: 5px; font-weight: bold; }
-                select, input { margin-bottom: 10px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
-                input[type="checkbox"] { margin-right: 5px; }
-                .checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; }
+                label { display: inline-block; margin: 2px; font-weight: bold; font-size: 14px; }
+                input[type="checkbox"] { margin-right: 3px; }
+                .card-group { margin-bottom: 15px; }
+                .suit-group { display: inline-block; vertical-align: top; margin-right: 20px; }
+                .suit-group strong { display: block; margin-bottom: 5px; font-size: 16px; }
                 button { padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; margin-right: 10px; }
                 button:hover { background-color: #45a049; }
                 .advice { margin-top: 20px; padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
@@ -272,46 +317,77 @@ if FLASK_AVAILABLE:
             </style>
         </head>
         <body>
-            <h1>Blackjack Probability Calculator</h1>
-            <form method="post">
-                <label>Dealer's visible card:</label>
-                <select name="dealer_card" required>
-                    <option value="">Select card</option>
-                    {% for rank in ranks %}
-                    <option value="{{ rank }}">{{ rank }}</option>
+            <h1>Kalkulator Prawdopodobieństwa w Blackjacku</h1>
+            <form method="post" id="advice-form">
+                <div class="card-group">
+                    <label>Widoczna karta krupiera:</label><br>
+                    {% for suit in suits %}
+                    <div class="suit-group">
+                        <strong>{{ suit }}</strong>
+                        {% for rank in ranks %}
+                        <label><input type="checkbox" name="dealer_card" value="{{ rank }}" {% if rank in dealer_selected %}checked{% endif %}> {{ rank }}</label>
+                        {% endfor %}
+                    </div>
                     {% endfor %}
-                </select><br>
-                <label>Player's cards (check all that apply):</label>
-                <div class="checkbox-group">
-                    {% for rank in ranks %}
-                    <label><input type="checkbox" name="player_cards" value="{{ rank }}"> {{ rank }}</label>
+                </div>
+                <div class="card-group">
+                    <label>Karty gracza (zaznacz wszystkie):</label><br>
+                    {% for suit in suits %}
+                    <div class="suit-group">
+                        <strong>{{ suit }}</strong>
+                        {% for rank in ranks %}
+                        <label><input type="checkbox" name="player_cards" value="{{ rank }}" {% if rank in player_selected %}checked{% endif %}> {{ rank }}</label>
+                        {% endfor %}
+                    </div>
                     {% endfor %}
-                </div><br>
-                <button type="submit" name="get_advice">Get Advice</button>
+                </div>
+                <label><input type="checkbox" name="can_double" {% if can_double_checked %}checked{% endif %}> Czy możesz podwoić stawkę?</label><br>
+                <button type="submit" name="get_advice">Uzyskaj poradę</button>
+                <button type="button" id="clear-btn">Wyczyść zaznaczenia</button>
             </form>
             {% if advice %}
             <div class="advice">
-                <h2>Advice:</h2>
+                <h2>Porada:</h2>
                 {{ advice | safe }}
             </div>
             {% endif %}
             <hr>
             <div class="history">
-                <h2>Game History (Card Counting)</h2>
+                <h2>Historia gry (liczenie kart)</h2>
                 <form method="post">
-                    <label>Cards played (space separated):</label>
-                    <input type="text" name="played_cards" placeholder="e.g., 10 J 5"><br>
-                    <button type="submit" name="add_history">Add to History</button>
+                    <label>Karty zagrane (oddzielone spacją):</label>
+                    <input type="text" name="played_cards" placeholder="np. 10 J 5"><br>
+                    <button type="submit" name="add_history">Dodaj do historii</button>
                 </form>
                 {% if history %}
-                <p><strong>Played cards:</strong> {{ history | join(' ') }}</p>
-                <p><strong>Remaining cards:</strong> {% for rank, count in remaining_global.items() %}{{ rank }}:{{ count }} {% endfor %}</p>
+                <p><strong>Zagrane karty:</strong> {{ history | join(' ') }}</p>
+                <p><strong>Pozostałe karty:</strong> {% for rank, count in remaining_global.items() %}{{ rank }}:{{ count }} {% endfor %}</p>
                 {% endif %}
             </div>
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
+                    // Make dealer checkboxes exclusive
+                    const dealerCheckboxes = document.querySelectorAll('input[name="dealer_card"]');
+                    dealerCheckboxes.forEach(cb => {
+                        cb.addEventListener('change', function() {
+                            if (this.checked) {
+                                dealerCheckboxes.forEach(other => {
+                                    if (other !== this) other.checked = false;
+                                });
+                            }
+                        });
+                    });
+                    // Clear button
+                    document.getElementById('clear-btn').addEventListener('click', function() {
+                        const allCheckboxes = document.querySelectorAll('#advice-form input[type="checkbox"]');
+                        allCheckboxes.forEach(cb => cb.checked = false);
+                    });
+                });
+            </script>
         </body>
         </html>
         """
-        return render_template_string(html, ranks=RANKS, advice=advice, history=history, remaining_global=remaining_global)
+        return render_template_string(html, suits=SUITS, ranks=RANKS, advice=advice, history=history, remaining_global=remaining_global, dealer_selected=dealer_selected, player_selected=player_selected, can_double_checked=can_double_checked)
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "web":
